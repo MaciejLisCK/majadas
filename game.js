@@ -37,25 +37,27 @@ function loop(ts) {
 
   if (!sleeping) {
     hamster.x+=hamster.dir*hamster.speed;
-    if (hamster.x>W*0.54||hamster.x<W*0.07) hamster.dir*=-1;
+    if (hamster.x>W*0.52||hamster.x<W*0.08) hamster.dir*=-1;
     elephant.x+=elephant.dir*elephant.speed;
-    if (elephant.x>W*0.90||elephant.x<W*0.42) elephant.dir*=-1;
-    drawElephant(elephant.x,gy-48,false,elephant.dir);
-    drawHamster(hamster.x,gy-32,false,hamster.dir);
+    if (elephant.x>W*0.88||elephant.x<W*0.44) elephant.dir*=-1;
+    drawElephant(elephant.x,gy-31,false,elephant.dir);
+    drawHamster(hamster.x,gy-16,false,hamster.dir);
   } else {
-    drawElephant(W*0.64,gy-38,true,1);
+    drawElephant(W*0.64,gy-31,true,1);
     drawHamster(W*0.23,gy-16,true,1);
   }
 
   if (!sleeping && !gameOver && !gameWon) {
     if (ts-lastSpawn>spawnDelay) {
       cubes.push({
-        x:80+Math.random()*(W-160), y:H*0.07+Math.random()*H*0.56,
+        x:100+Math.random()*(W-200), y:-30,
+        vy:2.2+Math.random()*1.4,
         rot:Math.random()*Math.PI*2, spawn:Date.now(),
-        life:2700+Math.random()*1900, id:Math.random()
+        life:4000+Math.random()*2000, id:Math.random(),
+        landed:false, landTime:0
       });
       lastSpawn=ts;
-      spawnDelay=Math.max(900,spawnDelay-22);
+      spawnDelay=Math.max(1000,spawnDelay-18);
     }
 
     if (ts - lastBallSpawn > 9000 + Math.random()*3000) {
@@ -73,17 +75,34 @@ function loop(ts) {
   const now=Date.now();
 
   cubes=cubes.filter(c=>{
-    const age=now-c.spawn;
-    if (age>c.life) {
-      if (!gameOver && !gameWon && !sleeping) {
-        lives=Math.max(0,lives-1); updateHUD();
-        addFx(c.x,c.y,'💔','#FF5555');
-        sfxLoseLife();
-        if (lives<=0) { gameOver=true; sfxGameOver(); }
+    if (!c.landed) {
+      c.vy+=GRAVITY;
+      c.y+=c.vy;
+      c.rot+=0.07;
+      if (c.y>=gy-22) {
+        c.y=gy-22; c.landed=true; c.landTime=Date.now();
       }
-      return false;
+    } else {
+      const landAge=now-c.landTime;
+      if (landAge>c.life) {
+        if (!gameOver && !gameWon && !sleeping) {
+          lives=Math.max(0,lives-1); updateHUD();
+          addFx(c.x,c.y,'💔','#FF5555');
+          sfxLoseLife();
+          if (lives<=0) { gameOver=true; sfxGameOver(); }
+        }
+        return false;
+      }
+      const hDist=Math.abs(c.x-hamster.x);
+      const eDist=Math.abs(c.x-elephant.x);
+      if (hDist<50||eDist<75) {
+        addFx(c.x,c.y,'+1 ⭐','#FFD700');
+        score++; updateHUD(); sfxCollect();
+        if (score>=WIN_SCORE) { gameWon=true; sfxWin(); }
+        return false;
+      }
     }
-    c.rot+=0.019; drawCube(c); return true;
+    drawCube(c); return true;
   });
 
   balls=balls.filter(b=>{

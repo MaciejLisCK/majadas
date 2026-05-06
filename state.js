@@ -7,6 +7,7 @@ let hamster = { x: 150, dir: 1, speed: 1.3 };
 let elephant = { x: 0,   dir: 1, speed: 0.75 };
 
 const WIN_SCORE = 40;
+const GRAVITY = 0.32;
 
 /* ── CONFIG ──────────────────────────────────────── */
 const TOD = {
