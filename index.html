@@ -71,10 +71,13 @@ addEventListener('resize', resize);
 
 /* ── STATE ───────────────────────────────────────── */
 let lives = 10, score = 0, tod = 'day', season = 'summer';
-let gameOver = false, frame = 0;
-let cubes = [], effects = [], lastSpawn = 0, spawnDelay = 2500;
+let gameOver = false, gameWon = false, frame = 0;
+let cubes = [], balls = [], effects = [], lastSpawn = 0, spawnDelay = 2500;
+let lastBallSpawn = 0;
 let hamster = { x: 150, dir: 1, speed: 1.3 };
 let elephant = { x: 0,   dir: 1, speed: 0.75 };
+
+const WIN_SCORE = 40;
 
 /* ── CONFIG ──────────────────────────────────────── */
 const TOD = {
@@ -89,6 +92,83 @@ const SEASONS = {
   autumn: { leaves:['#D2691E','#FF8C00','#A0522D'], trunk:'#8B4513', gTop:'#8B7355', gBot:'#6B5B3E' },
   winter: { leaves:['#9BB8CC','#7A9EB5','#B0C8D8'], trunk:'#696969', gTop:'#E0EEF5', gBot:'#B8D4E0' }
 };
+
+/* ── AUDIO ───────────────────────────────────────── */
+let audioCtx = null;
+let musicNextTime = 0;
+let melodyIdx = 0;
+let musicTimer = null;
+
+const MELODY = [
+  [523,0.25],[659,0.25],[784,0.25],[880,0.5],
+  [784,0.25],[659,0.25],[523,0.25],[392,0.5],
+  [440,0.25],[523,0.25],[659,0.5],[523,0.25],
+  [392,0.25],[440,0.25],[523,0.75]
+];
+
+function ensureAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  musicNextTime = audioCtx.currentTime + 0.1;
+  scheduleMusicBatch();
+}
+
+function scheduleMusicBatch() {
+  if (!audioCtx) return;
+  const ahead = 2.5;
+  while (musicNextTime < audioCtx.currentTime + ahead) {
+    const [freq, dur] = MELODY[melodyIdx % MELODY.length];
+    playTone(freq, musicNextTime, dur * 0.82, 0.06, 'triangle');
+    if (melodyIdx % 4 === 0) playTone(freq / 2, musicNextTime, dur * 0.5, 0.04, 'sine');
+    musicNextTime += dur;
+    melodyIdx++;
+  }
+  musicTimer = setTimeout(scheduleMusicBatch, 600);
+}
+
+function playTone(freq, start, dur, vol, type) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type || 'sine';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(vol, start);
+  gain.gain.exponentialRampToValueAtTime(0.001, start + dur);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start(start);
+  osc.stop(start + dur + 0.05);
+}
+
+function sfxCollect() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  playTone(880, t, 0.1, 0.22, 'sine');
+  playTone(1108, t + 0.07, 0.12, 0.18, 'sine');
+  playTone(1318, t + 0.14, 0.1, 0.14, 'sine');
+}
+
+function sfxLoseLife() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  playTone(300, t, 0.12, 0.28, 'sawtooth');
+  playTone(200, t + 0.1, 0.2, 0.22, 'sawtooth');
+  playTone(150, t + 0.22, 0.2, 0.18, 'sawtooth');
+}
+
+function sfxGameOver() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  [440,330,220,165].forEach((f,i) => playTone(f, t + i*0.22, 0.28, 0.2, 'sawtooth'));
+}
+
+function sfxWin() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  [523,659,784,1047,1319,1047,784,659,523].forEach((f,i) => {
+    playTone(f, t + i*0.14, 0.18, 0.18, 'triangle');
+  });
+}
 
 /* ── CONTROLS ────────────────────────────────────── */
 const TOD_LABELS = { dawn:'🌅 Świt', day:'☀️ Dzień', dusk:'🌆 Zmierzch', night:'🌙 Noc' };
@@ -122,12 +202,10 @@ function drawBg() {
   const W=canvas.width, H=canvas.height, cfg=TOD[tod], sc=SEASONS[season];
   const gH = H*0.72;
 
-  // Sky
   const sg = ctx.createLinearGradient(0,0,0,gH);
   cfg.sky.forEach((c,i) => sg.addColorStop(i/(cfg.sky.length-1), c));
   ctx.fillStyle = sg; ctx.fillRect(0,0,W,gH);
 
-  // Stars
   if (tod==='night'||tod==='dusk') {
     const sa = tod==='night'?0.88:0.38;
     for (let i=0;i<130;i++) {
@@ -140,7 +218,6 @@ function drawBg() {
     }
   }
 
-  // Sun
   const SUNS = {
     dawn: {x:0.12,y:0.26,r:28,c:'#FFB347',g:'#FF6B9D'},
     day:  {x:0.76,y:0.09,r:40,c:'#FFE066',g:'#FFD700'},
@@ -165,7 +242,6 @@ function drawBg() {
     ctx.restore();
   }
 
-  // Moon
   if (tod==='night') {
     ctx.save();
     ctx.shadowBlur=35; ctx.shadowColor='#FFFACD';
@@ -176,7 +252,6 @@ function drawBg() {
     ctx.restore();
   }
 
-  // Ground
   const gg=ctx.createLinearGradient(0,gH,0,H);
   gg.addColorStop(0,sc.gTop); gg.addColorStop(1,sc.gBot);
   ctx.fillStyle=gg; ctx.fillRect(0,gH,W,H-gH);
@@ -233,17 +308,14 @@ function drawBush(x,gy,w) {
 /* ── DRAW JUNGLE ─────────────────────────────────── */
 function drawJungle() {
   const W=canvas.width, H=canvas.height, gy=H*0.72;
-  // back
   [[0.04,0.52,2],[0.16,0.57,0],[0.30,0.55,1],[0.48,0.60,2],
    [0.63,0.53,0],[0.77,0.56,1],[0.93,0.54,2]].forEach(([rx,s,li])=>drawTree(W*rx,gy,s*0.88,li));
-  // mid
   [[0.01,0.84,1],[0.12,0.90,0],[0.24,0.82,2],[0.37,0.88,1],
    [0.54,0.85,0],[0.68,0.92,2],[0.84,0.83,1],[0.97,0.87,0]].forEach(([rx,s,li])=>drawTree(W*rx,gy,s,li));
   if (season!=='winter') { drawPalm(W*0.43,gy); drawPalm(W*0.61,gy); }
   [[0.06,1.2],[0.19,0.9],[0.32,1.1],[0.47,0.85],[0.57,1.15],[0.71,0.9],[0.83,1.05],[0.96,0.95]]
     .forEach(([rx,w])=>drawBush(W*rx,gy,w));
 
-  // Snow flakes
   if (season==='winter') {
     ctx.fillStyle='rgba(255,255,255,0.75)';
     for (let i=0;i<70;i++) {
@@ -263,52 +335,41 @@ function drawHamster(x,y,sleeping,dir) {
   if (!sleeping) ctx.translate(0,-Math.abs(Math.sin(frame*0.13))*4);
 
   if (sleeping) {
-    // body curled
     ctx.fillStyle=dimRGB(212,167,106,1,b);
     ctx.beginPath(); ctx.ellipse(0,0,36,21,0.28,0,Math.PI*2); ctx.fill();
     ctx.fillStyle=dimRGB(245,222,196,1,b);
     ctx.beginPath(); ctx.ellipse(10,5,20,12,0.28,0,Math.PI*2); ctx.fill();
-    // head
     ctx.fillStyle=dimRGB(212,167,106,1,b);
     ctx.beginPath(); ctx.arc(31,-7,17,0,Math.PI*2); ctx.fill();
     ctx.strokeStyle=dimRGB(80,55,38,1,b); ctx.lineWidth=2;
     ctx.beginPath(); ctx.arc(38,-10,4,0,Math.PI); ctx.stroke();
-    // Ear
     ctx.fillStyle=dimRGB(212,167,106,1,b); ctx.beginPath(); ctx.arc(26,-22,8,0,Math.PI*2); ctx.fill();
     ctx.fillStyle=dimRGB(255,155,170,1,b); ctx.beginPath(); ctx.arc(26,-22,5,0,Math.PI*2); ctx.fill();
     ctx.font='17px Arial'; ctx.fillText('💤',38,-22);
   } else {
-    // body
     ctx.fillStyle=dimRGB(212,167,106,1,b);
     ctx.beginPath(); ctx.ellipse(0,0,36,25,0,0,Math.PI*2); ctx.fill();
     ctx.fillStyle=dimRGB(245,230,200,1,b);
     ctx.beginPath(); ctx.ellipse(0,7,21,15,0,0,Math.PI*2); ctx.fill();
-    // head
     ctx.fillStyle=dimRGB(212,167,106,1,b);
     ctx.beginPath(); ctx.arc(34,-12,25,0,Math.PI*2); ctx.fill();
-    // puffy cheeks
     ctx.fillStyle=dimRGB(232,184,138,1,b);
     ctx.beginPath(); ctx.arc(38,-4,13,0,Math.PI*2); ctx.fill();
     ctx.fillStyle=dimRGB(240,200,158,1,b);
     ctx.beginPath(); ctx.arc(27,-4,10,0,Math.PI*2); ctx.fill();
-    // ear
     ctx.fillStyle=dimRGB(212,167,106,1,b); ctx.beginPath(); ctx.arc(28,-33,10,0,Math.PI*2); ctx.fill();
     ctx.fillStyle=dimRGB(255,155,170,1,b); ctx.beginPath(); ctx.arc(28,-33,6.5,0,Math.PI*2); ctx.fill();
-    // eye
     ctx.fillStyle=dimRGB(44,24,16,1,b); ctx.beginPath(); ctx.arc(43,-17,5,0,Math.PI*2); ctx.fill();
     ctx.fillStyle='white'; ctx.beginPath(); ctx.arc(45,-19,2,0,Math.PI*2); ctx.fill();
-    // nose
     ctx.fillStyle=dimRGB(255,155,170,1,b); ctx.beginPath(); ctx.arc(55,-10,4.5,0,Math.PI*2); ctx.fill();
     ctx.strokeStyle=dimRGB(80,55,38,1,b); ctx.lineWidth=1.5;
     ctx.beginPath(); ctx.arc(55,-7,3,0,Math.PI); ctx.stroke();
-    // legs
     ctx.fillStyle=dimRGB(196,154,90,1,b);
     [-18,-6,8,20].forEach((lx,i)=>{
       const la=walk*(i%2===0?1:-1)*0.06;
       ctx.save(); ctx.translate(lx,20); ctx.rotate(la);
       ctx.beginPath(); ctx.roundRect(-5,0,10,15,4); ctx.fill(); ctx.restore();
     });
-    // tail
     ctx.fillStyle=dimRGB(196,154,90,1,b); ctx.beginPath(); ctx.arc(-34,-1,9,0,Math.PI*2); ctx.fill();
   }
   ctx.restore();
@@ -339,7 +400,6 @@ function drawElephant(x,y,sleeping,dir) {
     ctx.quadraticCurveTo(102,36,96,30); ctx.quadraticCurveTo(108,14,84,-2); ctx.fill();
     ctx.font='22px Arial'; ctx.fillText('💤',108,-38);
   } else {
-    // legs
     ctx.fillStyle=DARK;
     [-52,-22,12,42].forEach((lx,i)=>{
       const la=walk*(i%2===0?1:-1)*0.042;
@@ -349,23 +409,18 @@ function drawElephant(x,y,sleeping,dir) {
       ctx.beginPath(); ctx.ellipse(0,52,15,7,0,0,Math.PI*2); ctx.fill();
       ctx.restore();
     });
-    // body
     ctx.fillStyle=BASE;
     ctx.beginPath(); ctx.ellipse(0,0,78,53,0,0,Math.PI*2); ctx.fill();
     ctx.fillStyle=LIGHT;
     ctx.beginPath(); ctx.ellipse(0,16,50,30,0,0,Math.PI*2); ctx.fill();
-    // head
     ctx.fillStyle=BASE;
     ctx.beginPath(); ctx.arc(73,-20,47,0,Math.PI*2); ctx.fill();
-    // ear
     ctx.fillStyle=LIGHT;
     ctx.beginPath(); ctx.ellipse(53,-8,29,47,-0.2,0,Math.PI*2); ctx.fill();
     ctx.fillStyle=dimRGB(190,155,145,1,b);
     ctx.beginPath(); ctx.ellipse(53,-8,18,31,-0.2,0,Math.PI*2); ctx.fill();
-    // eye
     ctx.fillStyle=dimRGB(20,12,5,1,b); ctx.beginPath(); ctx.arc(94,-30,7,0,Math.PI*2); ctx.fill();
     ctx.fillStyle='white'; ctx.beginPath(); ctx.arc(96,-32,2.5,0,Math.PI*2); ctx.fill();
-    // trunk
     const ts=Math.sin(frame*0.065)*13;
     ctx.fillStyle=BASE;
     ctx.beginPath();
@@ -375,11 +430,9 @@ function drawElephant(x,y,sleeping,dir) {
     ctx.bezierCurveTo(118,48,122+ts*0.5,12,93,-4);
     ctx.fill();
     ctx.fillStyle=DARK; ctx.beginPath(); ctx.ellipse(103,65,9,6,0.3,0,Math.PI*2); ctx.fill();
-    // tusks
     ctx.strokeStyle=dimRGB(255,250,195,0.9,b); ctx.lineWidth=6; ctx.lineCap='round';
     ctx.beginPath(); ctx.moveTo(98,-4); ctx.quadraticCurveTo(134,9,126,27); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(92,-1); ctx.quadraticCurveTo(128,14,120,32); ctx.stroke();
-    // tail
     ctx.strokeStyle=BASE; ctx.lineWidth=5;
     ctx.beginPath(); ctx.moveTo(-78,-4); ctx.quadraticCurveTo(-105,-22,-98,10); ctx.stroke();
   }
@@ -408,6 +461,228 @@ function drawCube(c) {
   ctx.restore();
 }
 
+/* ── DRAW BALL (pułapka) ─────────────────────────── */
+function drawBall(b) {
+  const age = (Date.now() - b.spawn) / b.life;
+  const alpha = age > 0.7 ? 1 - (age - 0.7) / 0.3 : 1;
+  const bounce = Math.abs(Math.sin(frame * 0.12 + b.id * 7)) * 14;
+  const wobble = Math.sin(frame * 0.18 + b.id * 4) * 2;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(b.x, b.y);
+
+  // shadow on ground
+  const shadowY = bounce + 32;
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath();
+  ctx.ellipse(wobble, shadowY, 20 - bounce * 0.3, 7, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.translate(wobble, -bounce);
+
+  // ball gradient
+  const grad = ctx.createRadialGradient(-9, -10, 3, 0, 0, 26);
+  grad.addColorStop(0, '#FF8844');
+  grad.addColorStop(0.45, '#DD2200');
+  grad.addColorStop(1, '#880000');
+  ctx.shadowBlur = 14;
+  ctx.shadowColor = '#FF4400';
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(0, 0, 26, 0, Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // shine
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  ctx.beginPath(); ctx.ellipse(-8, -9, 8, 5, -0.5, 0, Math.PI*2); ctx.fill();
+
+  // small shine dot
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath(); ctx.arc(6, 8, 4, 0, Math.PI*2); ctx.fill();
+
+  ctx.restore();
+}
+
+/* ── DRAW FOX ────────────────────────────────────── */
+function drawFox(cx, cy, happy) {
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  // tail
+  ctx.save();
+  const tailWag = happy ? Math.sin(frame * 0.15) * 18 : Math.sin(frame * 0.04) * 5;
+  ctx.translate(-55, 30);
+  ctx.rotate((-0.5 + tailWag * 0.015));
+  // tail base
+  ctx.fillStyle = '#E06010';
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.bezierCurveTo(-40, -20, -80, 10, -70, 50);
+  ctx.bezierCurveTo(-60, 80, -20, 70, 0, 40);
+  ctx.closePath();
+  ctx.fill();
+  // tail tip white
+  ctx.fillStyle = '#F5F0E8';
+  ctx.beginPath();
+  ctx.ellipse(-55, 42, 22, 18, 0.4, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+
+  // body
+  ctx.fillStyle = '#E06010';
+  ctx.beginPath();
+  ctx.ellipse(0, 30, 55, 42, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // chest white
+  ctx.fillStyle = '#F5F0E8';
+  ctx.beginPath();
+  ctx.ellipse(0, 40, 32, 26, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // head
+  ctx.fillStyle = '#E06010';
+  ctx.beginPath();
+  ctx.ellipse(0, -28, 50, 44, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // left ear
+  ctx.fillStyle = '#E06010';
+  ctx.beginPath();
+  ctx.moveTo(-30, -55);
+  ctx.lineTo(-58, -105);
+  ctx.lineTo(-6, -78);
+  ctx.closePath();
+  ctx.fill();
+  // left ear inner
+  ctx.fillStyle = '#FF8888';
+  ctx.beginPath();
+  ctx.moveTo(-30, -60);
+  ctx.lineTo(-52, -98);
+  ctx.lineTo(-12, -78);
+  ctx.closePath();
+  ctx.fill();
+
+  // right ear
+  ctx.fillStyle = '#E06010';
+  ctx.beginPath();
+  ctx.moveTo(30, -55);
+  ctx.lineTo(58, -105);
+  ctx.lineTo(6, -78);
+  ctx.closePath();
+  ctx.fill();
+  // right ear inner
+  ctx.fillStyle = '#FF8888';
+  ctx.beginPath();
+  ctx.moveTo(30, -60);
+  ctx.lineTo(52, -98);
+  ctx.lineTo(12, -78);
+  ctx.closePath();
+  ctx.fill();
+
+  // face white muzzle area
+  ctx.fillStyle = '#F5F0E8';
+  ctx.beginPath();
+  ctx.ellipse(0, -14, 28, 22, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // mask markings (dark orange around eyes)
+  ctx.fillStyle = '#C04808';
+  ctx.beginPath();
+  ctx.ellipse(-20, -38, 14, 10, -0.3, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(20, -38, 14, 10, 0.3, 0, Math.PI*2);
+  ctx.fill();
+
+  // eyes
+  if (happy) {
+    // happy curved eyes
+    ctx.strokeStyle = '#1A0A00';
+    ctx.lineWidth = 3.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(-20, -38, 9, Math.PI * 1.1, Math.PI * 1.9);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(20, -38, 9, Math.PI * 1.1, Math.PI * 1.9);
+    ctx.stroke();
+    // eye shine
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(-14, -44, 3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(26, -44, 3, 0, Math.PI*2); ctx.fill();
+  } else {
+    // sad eyes - droopy
+    ctx.fillStyle = '#1A0A00';
+    ctx.beginPath(); ctx.ellipse(-20, -36, 7, 8, 0.3, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(20, -36, 7, 8, -0.3, 0, Math.PI*2); ctx.fill();
+    // white shine
+    ctx.fillStyle = 'white';
+    ctx.beginPath(); ctx.arc(-17, -39, 2.5, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(23, -39, 2.5, 0, Math.PI*2); ctx.fill();
+    // sad eyebrows
+    ctx.strokeStyle = '#1A0A00';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-30, -48); ctx.lineTo(-12, -44); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(30, -48); ctx.lineTo(12, -44); ctx.stroke();
+    // tears
+    ctx.fillStyle = 'rgba(100,160,255,0.8)';
+    const tearDrop = (tx, ty) => {
+      ctx.beginPath();
+      ctx.arc(tx, ty, 4, 0, Math.PI*2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(tx - 4, ty);
+      ctx.lineTo(tx, ty + 10);
+      ctx.lineTo(tx + 4, ty);
+      ctx.fill();
+    };
+    const tearOff = (frame * 0.04) % 1;
+    tearDrop(-20, -26 + tearOff * 20);
+    tearDrop(20, -26 + ((tearOff + 0.5) % 1) * 20);
+  }
+
+  // nose
+  ctx.fillStyle = '#1A0A00';
+  ctx.beginPath();
+  ctx.ellipse(0, -18, 7, 5, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath(); ctx.arc(-2, -20, 2, 0, Math.PI*2); ctx.fill();
+
+  // mouth
+  ctx.strokeStyle = '#1A0A00';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  if (happy) {
+    ctx.beginPath();
+    ctx.moveTo(-12, -9);
+    ctx.quadraticCurveTo(-6, -2, 0, -4);
+    ctx.quadraticCurveTo(6, -2, 12, -9);
+    ctx.stroke();
+    // tongue
+    ctx.fillStyle = '#FF6688';
+    ctx.beginPath();
+    ctx.ellipse(0, -1, 8, 6, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = '#CC4466';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, -5);
+    ctx.lineTo(0, 3);
+    ctx.stroke();
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(-14, -6);
+    ctx.quadraticCurveTo(-6, -14, 0, -12);
+    ctx.quadraticCurveTo(6, -14, 14, -6);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 /* ── DRAW EFFECTS ────────────────────────────────── */
 function drawEffects() {
   effects=effects.filter(e=>{
@@ -424,18 +699,53 @@ function drawEffects() {
   });
 }
 
-/* ── GAME OVER ───────────────────────────────────── */
+/* ── GAME OVER SCREEN ────────────────────────────── */
 function drawGameOver() {
   const W=canvas.width, H=canvas.height;
-  ctx.fillStyle='rgba(0,0,0,0.72)'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(0,0,W,H);
   ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
+
+  drawFox(W/2, H/2 - 60, false);
+
   ctx.shadowBlur=25; ctx.shadowColor='#FF4444';
-  ctx.fillStyle='#FF6B6B'; ctx.font='bold 78px Arial';
-  ctx.fillText('KONIEC GRY!',W/2,H/2-72);
-  ctx.shadowColor='#FFD700'; ctx.fillStyle='#FFD700'; ctx.font='bold 44px Arial';
-  ctx.fillText(`⭐ Wynik: ${score}`,W/2,H/2+14);
-  ctx.shadowBlur=0; ctx.fillStyle='rgba(255,255,255,0.82)'; ctx.font='24px Arial';
-  ctx.fillText('Kliknij, aby zagrać ponownie',W/2,H/2+82);
+  ctx.fillStyle='#FF6B6B'; ctx.font='bold 64px Arial';
+  ctx.fillText('KONIEC GRY!',W/2,H/2+100);
+  ctx.shadowColor='#FFD700'; ctx.fillStyle='#FFD700'; ctx.font='bold 38px Arial';
+  ctx.fillText(`⭐ Wynik: ${score}`,W/2,H/2+158);
+  ctx.shadowBlur=0; ctx.fillStyle='rgba(255,255,255,0.82)'; ctx.font='22px Arial';
+  ctx.fillText('Kliknij, aby zagrać ponownie',W/2,H/2+210);
+  ctx.restore();
+}
+
+/* ── WIN SCREEN ──────────────────────────────────── */
+function drawWin() {
+  const W=canvas.width, H=canvas.height;
+  ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.fillRect(0,0,W,H);
+
+  // confetti
+  for (let i=0;i<60;i++) {
+    const cf=['#FFD700','#FF6B9D','#00E5FF','#69FF47','#FF9500'];
+    ctx.fillStyle = cf[i%cf.length];
+    const cx=(Math.sin(i*137.5+frame*0.04)*0.5+0.5)*W;
+    const cy=((frame*0.006*(0.5+(i%5)*0.15)+i*0.13)%1)*H;
+    ctx.save();
+    ctx.translate(cx,cy);
+    ctx.rotate(frame*0.05+i);
+    ctx.fillRect(-5,-3,10,6);
+    ctx.restore();
+  }
+
+  ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
+
+  drawFox(W/2, H/2 - 60, true);
+
+  ctx.shadowBlur=30; ctx.shadowColor='#FFD700';
+  ctx.fillStyle='#FFD700'; ctx.font='bold 68px Arial';
+  ctx.fillText('WYGRAŁEŚ! 🎉',W/2,H/2+110);
+  ctx.shadowColor='#FFF'; ctx.fillStyle='#FFF'; ctx.font='bold 36px Arial';
+  ctx.fillText(`⭐ Zebrałeś ${score} kostek!`,W/2,H/2+168);
+  ctx.shadowBlur=0; ctx.fillStyle='rgba(255,255,255,0.82)'; ctx.font='22px Arial';
+  ctx.fillText('Kliknij, aby zagrać ponownie',W/2,H/2+216);
   ctx.restore();
 }
 
@@ -449,7 +759,6 @@ function loop(ts) {
   drawBg();
   drawJungle();
 
-  // animals
   if (!sleeping) {
     hamster.x+=hamster.dir*hamster.speed;
     if (hamster.x>W*0.54||hamster.x<W*0.07) hamster.dir*=-1;
@@ -462,53 +771,97 @@ function loop(ts) {
     drawHamster(W*0.23,gy-16,true,1);
   }
 
-  // spawn cubes
-  if (!sleeping&&!gameOver&&ts-lastSpawn>spawnDelay) {
-    cubes.push({
-      x:80+Math.random()*(W-160), y:H*0.07+Math.random()*H*0.56,
-      rot:Math.random()*Math.PI*2, spawn:Date.now(),
-      life:2700+Math.random()*1900, id:Math.random()
-    });
-    lastSpawn=ts;
-    spawnDelay=Math.max(900,spawnDelay-22);
+  if (!sleeping && !gameOver && !gameWon) {
+    // spawn sugar cubes
+    if (ts-lastSpawn>spawnDelay) {
+      cubes.push({
+        x:80+Math.random()*(W-160), y:H*0.07+Math.random()*H*0.56,
+        rot:Math.random()*Math.PI*2, spawn:Date.now(),
+        life:2700+Math.random()*1900, id:Math.random()
+      });
+      lastSpawn=ts;
+      spawnDelay=Math.max(900,spawnDelay-22);
+    }
+
+    // spawn balls every ~9 seconds
+    if (ts - lastBallSpawn > 9000 + Math.random()*3000) {
+      balls.push({
+        x: 120 + Math.random()*(W-240),
+        y: H*0.1 + Math.random()*H*0.48,
+        spawn: Date.now(),
+        life: 3500 + Math.random()*2000,
+        id: Math.random()
+      });
+      lastBallSpawn = ts;
+    }
   }
 
-  // update cubes
   const now=Date.now();
+
+  // update & draw cubes
   cubes=cubes.filter(c=>{
     const age=now-c.spawn;
     if (age>c.life) {
-      if (!gameOver&&!sleeping) {
+      if (!gameOver && !gameWon && !sleeping) {
         lives=Math.max(0,lives-1); updateHUD();
         addFx(c.x,c.y,'💔','#FF5555');
-        if (lives<=0) gameOver=true;
+        sfxLoseLife();
+        if (lives<=0) { gameOver=true; sfxGameOver(); }
       }
       return false;
     }
     c.rot+=0.019; drawCube(c); return true;
   });
 
+  // update & draw balls
+  balls=balls.filter(b=>{
+    const age=now-b.spawn;
+    if (age>b.life) return false;
+    drawBall(b); return true;
+  });
+
   drawEffects();
 
-  // overlay
   const fog=TOD[tod].fog;
   if (fog) { ctx.fillStyle=fog; ctx.fillRect(0,0,W,H); }
 
   if (gameOver) drawGameOver();
+  else if (gameWon) drawWin();
 }
 
 /* ── INPUT ───────────────────────────────────────── */
 canvas.addEventListener('click',e=>{
-  if (gameOver) {
-    lives=10; score=0; cubes=[]; spawnDelay=2500; lastSpawn=0;
-    gameOver=false; updateHUD(); return;
+  ensureAudio();
+
+  if (gameOver || gameWon) {
+    lives=10; score=0; cubes=[]; balls=[]; spawnDelay=2500; lastSpawn=0; lastBallSpawn=0;
+    gameOver=false; gameWon=false; updateHUD(); return;
   }
+
   const {left,top}=canvas.getBoundingClientRect();
   const mx=e.clientX-left, my=e.clientY-top;
+
+  // check balls first (trap!)
+  for (let i=balls.length-1;i>=0;i--) {
+    if (Math.hypot(mx-balls[i].x,my-balls[i].y)<26) {
+      const bx=balls[i].x, by=balls[i].y;
+      balls.splice(i,1);
+      lives=Math.max(0,lives-1); updateHUD();
+      addFx(bx,by,'💔 -1 życie','#FF3333');
+      sfxLoseLife();
+      if (lives<=0) { gameOver=true; sfxGameOver(); }
+      return;
+    }
+  }
+
+  // check cubes
   for (let i=cubes.length-1;i>=0;i--) {
     if (Math.hypot(mx-cubes[i].x,my-cubes[i].y)<30) {
       addFx(cubes[i].x,cubes[i].y,'+1 ⭐','#FFD700');
-      cubes.splice(i,1); score++; updateHUD(); break;
+      cubes.splice(i,1); score++; updateHUD();
+      sfxCollect();
+      if (score >= WIN_SCORE) { gameWon=true; sfxWin(); }
+      break;
     }
   }
 });
